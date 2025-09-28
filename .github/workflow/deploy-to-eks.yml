@@ -1,0 +1,67 @@
+# .github/workflows/deploy-to-eks.yml
+
+name: Build and Deploy to EKS
+
+# This workflow is triggered on a push to the main branch
+on:
+  push:
+    branches:
+      - main
+
+# Permissions required for OIDC authentication with AWS
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: 
+      name: production # This targets the environment for manual approval
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: 1. Check for "Hello World" in HTML
+        run: |
+          if ! grep -q "Hello World" index.html; then
+            echo "The phrase 'Hello World' was not found. Halting the pipeline."
+            exit 1
+          fi
+          echo "Found 'Hello World', proceeding with the pipeline."
+
+      - name: 2. Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: 3. Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 4. Build, Tag, and Push Docker Image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build the Docker image
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          
+          # Push the image to ECR
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          
+          # Set the full image URI as an output for the next step
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: 5. Update Kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+
+      - name: 6. Update Kubernetes Deployment
+        run: |
+          # Use kubectl to set the new image for the deployment
+          # This command triggers a rolling update of your pods
+          kubectl set image deployment/nginx-deployment nginx=${{ steps.build-image.outputs.image }} -n default
